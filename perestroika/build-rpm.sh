@@ -39,7 +39,7 @@ This package provides the %{-n*} kernel modules
   [ "`cat ${specfile} | grep -c '^%changelog'`" -eq 0 ] && echo "%changelog" >> ${specfile}
   if [ "$IS_OPENSTACK" == "true" ] ; then
       # Get version number from the latest git tag for openstack packages
-      local release_tag=$(git -C $_srcpath describe --abbrev=0 --candidates=1)
+      local release_tag=$(git -C $_srcpath describe --abbrev=0 --candidates=1 --match "*[0-9]*")
       # Deal with PyPi versions like 2015.1.0rc1
       # It breaks version comparison
       # Change it to 2015.1.0~rc1
@@ -51,6 +51,10 @@ This package provides the %{-n*} kernel modules
       [ "$GERRIT_CHANGE_STATUS" == "NEW" ] \
           && [ ${GERRIT_PROJECT} == "${SRC_PROJECT}" ] \
           && _rev=$(( $_rev + 1 ))
+      [ "$IS_HOTFIX" == "true" ] \
+          && _rev=$(get_extra_revision hotfix ${_srcpath} ${release_tag})
+      [ "$IS_SECURITY" == "true" ] \
+          && _rev=$(get_extra_revision security ${_srcpath} ${release_tag})
       local release="mos${_rev}"
       local TAR_NAME=${PACKAGENAME}-${version}.tar.gz
       # Update version and changelog
@@ -64,8 +68,15 @@ This package provides the %{-n*} kernel modules
           # Do not perform `setup.py sdist` for openstack-macros package
           tar -czf ${BUILDDIR}/$TAR_NAME $EXCLUDES .
       else
+          # Use virtualenv to deal with different pbr requirements
+          local venv=$(mktemp -d)
+          virtualenv "$venv"
+          source "${venv}/bin/activate"
+          pip install --upgrade setuptools
           python setup.py --version  # this will download pbr if it's not available
           PBR_VERSION=$release_tag python setup.py sdist -d ${BUILDDIR}/
+          deactivate
+          [ -d "$venv" ] && rm -rf "$venv"
           # Fix source folder name at sdist tarball
           local sdist_tarball=$(find ${BUILDDIR}/ -maxdepth 1 -name "*.gz")
           if [ "$(tar -tf $sdist_tarball | head -n 1 | cut -d'/' -f1)" != "${PACKAGENAME}-${version}" ] ; then
@@ -118,15 +129,49 @@ This package provides the %{-n*} kernel modules
   # Build stage
   local REQUEST=$REQUEST_NUM
   [ -n "$LP_BUG" ] && REQUEST=$LP_BUG
+  RPM_HOTFIX_REPO_PATH=${RPM_HOTFIX_REPO_PATH:-${RPM_OS_REPO_PATH%/*}/hotfix}
   [ -n "${EXTRAREPO}" ] && EXTRAREPO="${EXTRAREPO}|"
   EXTRAREPO="${EXTRAREPO}repo1,http://${REMOTE_REPO_HOST}/${RPM_OS_REPO_PATH}/x86_64"
+  case true in
+      "$IS_HOTFIX" )
+          EXTRAREPO="${EXTRAREPO}|repo2,http://${REMOTE_REPO_HOST}/${RPM_HOTFIX_REPO_PATH}/x86_64"
+          EXTRAREPO="${EXTRAREPO}|repo3,http://${REMOTE_REPO_HOST}/${RPM_UPDATES_REPO_PATH}/x86_64"
+          EXTRAREPO="${EXTRAREPO}|repo4,http://${REMOTE_REPO_HOST}/${RPM_SECURITY_REPO_PATH}/x86_64"
+          ;;
+      "$IS_SECURITY" )
+          EXTRAREPO="${EXTRAREPO}|repo2,http://${REMOTE_REPO_HOST}/${RPM_UPDATES_REPO_PATH}/x86_64"
+          EXTRAREPO="${EXTRAREPO}|repo3,http://${REMOTE_REPO_HOST}/${RPM_SECURITY_REPO_PATH}/x86_64"
+          ;;
+      "$IS_UPDATES" )
+          EXTRAREPO="${EXTRAREPO}|repo2,http://${REMOTE_REPO_HOST}/${RPM_PROPOSED_REPO_PATH}/x86_64"
+          EXTRAREPO="${EXTRAREPO}|repo3,http://${REMOTE_REPO_HOST}/${RPM_UPDATES_REPO_PATH}/x86_64"
+          EXTRAREPO="${EXTRAREPO}|repo4,http://${REMOTE_REPO_HOST}/${RPM_SECURITY_REPO_PATH}/x86_64"
+          ;;
+  esac
 
-  [ "$IS_UPDATES" == 'true' ] && \
-    EXTRAREPO="${EXTRAREPO}|repo2,http://${REMOTE_REPO_HOST}/${RPM_PROPOSED_REPO_PATH}/x86_64"
-  [ "$GERRIT_CHANGE_STATUS" == "NEW" ] && [ "$IS_UPDATES" != "true" ] && [ -n "$LP_BUG" ] && \
-    EXTRAREPO="${EXTRAREPO}|repo3,http://${REMOTE_REPO_HOST}/${REPO_REQUEST_PATH_PREFIX}/${REQUEST}/${RPM_OS_REPO_PATH}/x86_64"
-  [ "$GERRIT_STATUS" == "NEW" ] && [ "$IS_UPDATES" == "true" ] && [ -n "$LP_BUG" ] && \
-    EXTRAREPO="${EXTRAREPO}|repo3,http://${REMOTE_REPO_HOST}/${REPO_REQUEST_PATH_PREFIX}/${REQUEST}/${RPM_PROPOSED_REPO_PATH}/x86_64"
+  if [ "$GERRIT_CHANGE_STATUS" == "NEW" ] && [ -n "$LP_BUG" -o -n "$CUSTOM_REPO_ID" ] ; then
+      local REMOTE_REQUEST_REPO_HOST=${REMOTE_REQUEST_REPO_HOST:-$REMOTE_REPO_HOST}
+      local RPM_REQUEST_HOTFIX_REPO_PATH=${RPM_REQUEST_HOTFIX_REPO_PATH:-$RPM_HOTFIX_REPO_PATH}
+      local RPM_REQUEST_SECURITY_REPO_PATH=${RPM_REQUEST_SECURITY_REPO_PATH:-$RPM_SECURITY_REPO_PATH}
+      local RPM_REQUEST_PROPOSED_REPO_PATH=${RPM_REQUEST_PROPOSED_REPO_PATH:-$RPM_PROPOSED_REPO_PATH}
+      local RPM_REQUEST_OS_REPO_PATH=${RPM_REQUEST_OS_REPO_PATH:-$RPM_OS_REPO_PATH}
+      case true in
+          "$IS_HOTFIX" )
+              local RPM_REQUEST_REPO_PATH=$RPM_REQUEST_HOTFIX_REPO_PATH
+              ;;
+          "$IS_SECURITY" )
+              local RPM_REQUEST_REPO_PATH=$RPM_REQUEST_SECURITY_REPO_PATH
+              ;;
+          "$IS_UPDATES" )
+              local RPM_REQUEST_REPO_PATH=$RPM_REQUEST_PROPOSED_REPO_PATH
+              ;;
+          * )
+              local RPM_REQUEST_REPO_PATH=$RPM_REQUEST_OS_REPO_PATH
+              ;;
+      esac
+      EXTRAREPO="${EXTRAREPO}|repo5,http://${REMOTE_REQUEST_REPO_HOST}/${REPO_REQUEST_PATH_PREFIX}/${REQUEST}/${RPM_REQUEST_REPO_PATH}/x86_64"
+  fi
+
   export EXTRAREPO
 
   if [ -n "$EXTRAREPO" ] ; then
@@ -165,6 +210,7 @@ This package provides the %{-n*} kernel modules
 		REQUEST_NUM=$REQUEST_NUM
 		LP_BUG=$LP_BUG
 		IS_SECURITY=$IS_SECURITY
+		IS_HOTFIX=$IS_HOTFIX
 		EXTRAREPO="$EXTRAREPO"
 		REPO_TYPE=rpm
 		DIST=$DIST

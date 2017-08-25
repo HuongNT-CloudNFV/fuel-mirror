@@ -1,6 +1,7 @@
 # GLOBAL variables
-ubuntu_baseurl: &ubuntu_baseurl http://archive.ubuntu.com/ubuntu
+ubuntu_baseurl: &ubuntu_baseurl http://10.84.8.121/ubuntu
 mos_baseurl: &mos_baseurl http://mirror.fuel-infra.org/mos-repos/ubuntu/$mos_version
+mos92_baseurl: &mos92_baseurl http://mirror.fuel-infra.org/mos-repos/ubuntu/9.2
 
 fuel_release_match:
    version: $openstack_version
@@ -41,7 +42,7 @@ repos:
         suite: "mos$mos_version"
         section: "main restricted"
         type: "deb"
-        priority: 1000
+        priority: 1050
 
     -   &mos_updates
         name: "mos-updates"
@@ -49,7 +50,7 @@ repos:
         suite: "mos$mos_version-updates"
         section: "main restricted"
         type: "deb"
-        priority: 1000
+        priority: 1050
 
     -   &mos_security
         name: "mos-security"
@@ -57,15 +58,31 @@ repos:
         suite: "mos$mos_version-security"
         section: "main restricted"
         type: "deb"
-        priority: 1000
+        priority: 1050
 
-    -   &mos_holdback
-        name: "mos-holdback"
-        uri: *mos_baseurl
+    -   &mos92_updates
+        name: "mos9.2-updates"
+        uri: *mos92_baseurl
+        suite: "mos$mos_version-updates"
+        section: "main restricted"
+        type: "deb"
+        priority: 1050
+
+    -   &mos92_security
+        name: "mos9.2-security"
+        uri: *mos92_baseurl
+        suite: "mos$mos_version-security"
+        section: "main restricted"
+        type: "deb"
+        priority: 1050
+
+    -   &mos92_holdback
+        name: "mos9.2-holdback"
+        uri: *mos92_baseurl
         suite: "mos$mos_version-holdback"
         section: "main restricted"
         type: "deb"
-        priority: 1000
+        priority: 1100
 
 # Packages are required to build bootstrap images for a system.
 # The mirror should contiain such packages in addition to local mirror.
@@ -95,10 +112,15 @@ packages: &packages
      - "irqbalance"
      - "language-pack-en"
      - "libapache2-mod-fastcgi"
+     - "libmysqlclient18"
+     - "libicu-dev"
      - "libnss3-tools"
+     - "libseccomp2"
      - "linux-firmware-nonfree"
      - "linux-headers-generic-lts-trusty"
+     - "linux-headers-generic-lts-xenial"
      - "linux-image-generic-lts-trusty"
+     - "linux-image-generic-lts-xenial"
      - "live-boot"
      - "livecd-rootfs"
      - "mc"
@@ -130,6 +152,10 @@ packages: &packages
      - "vim"
      - "virt-what"
      - "xinetd"
+     - "xmlstarlet"
+     - "tftpd-hpa"
+     - "syslinux"
+     - "systemd-shim"
 
 
 groups:
@@ -137,7 +163,9 @@ groups:
         - *mos
         - *mos_updates
         - *mos_security
-        - *mos_holdback
+        - *mos92_updates
+        - *mos92_security
+        - *mos92_holdback
 
     ubuntu:
         - *ubuntu

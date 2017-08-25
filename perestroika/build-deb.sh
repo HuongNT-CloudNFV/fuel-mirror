@@ -32,26 +32,42 @@ main () {
       TAR_NAME="${srcpackagename}_${version#*:}.orig.tar.gz"
       if [ "$IS_OPENSTACK" == "true" ] ; then
           # Get version number from the latest git tag for openstack packages
-          local release_tag=$(git -C $_srcpath describe --abbrev=0 --candidates=1)
+          local release_tag=$(git -C $_srcpath describe --abbrev=0 --candidates=1 --match "*[0-9]*")
           # Deal with PyPi versions like 2015.1.0rc1
           # It breaks version comparison
           # Change it to 2015.1.0~rc1
           local convert_version_py="$(dirname $(readlink -e $0))/convert_version.py"
           version=$(python ${convert_version_py} --tag ${release_tag})
-          local TAR_NAME="${srcpackagename}_${version}.orig.tar.gz"
           # Get revision number as commit count from tag to head of source branch
-          local _rev=$(git -C $_srcpath rev-list --no-merges ${release_tag}..origin/${SOURCE_BRANCH} | wc -l)
+          if [ "$IS_PLUGIN" = "true" ]
+          then
+              local _rev=$(git -C $_srcpath rev-list ${release_tag}..origin/${SOURCE_BRANCH} | wc -l)
+          else
+              local _rev=$(git -C $_srcpath rev-list --no-merges ${release_tag}..origin/${SOURCE_BRANCH} | wc -l)
+          fi
           [ "$GERRIT_CHANGE_STATUS" == "NEW" ] \
               && [ ${GERRIT_PROJECT} == "${SRC_PROJECT}" ] \
               && _rev=$(( $_rev + 1 ))
-          local release=$(dpkg-parsechangelog --show-field Version -l${_debianpath}/debian/changelog | cut -d'-' -f2 | sed -r 's|[0-9]+$||')
-          local release="${release}${_rev}"
+          [ "$IS_HOTFIX" == "true" ] \
+              && _rev=$(get_extra_revision hotfix ${_srcpath} ${release_tag})
+          [ "$IS_SECURITY" == "true" ] \
+              && _rev=$(get_extra_revision security ${_srcpath} ${release_tag})
+          if [ "$IS_PLUGIN" = "true" ]
+          then
+              version=${version}.dev${_rev}
+              local release=$(dpkg-parsechangelog --show-field Version -l${_debianpath}/debian/changelog | awk -F'-' '{print $NF}')
+              local ditribution_string=$(dpkg-parsechangelog --show-field Distribution -l${_debianpath}/debian/changelog)
+          else
+              local release=$(dpkg-parsechangelog --show-field Version -l${_debianpath}/debian/changelog | awk -F'-' '{print $NF}' | sed -r 's|[0-9]+$||')
+              local release="${release}${_rev}"
+          fi
           local fullver=${epochnumber}${version}-${release}
+          local TAR_NAME="${srcpackagename}_${version}.orig.tar.gz"
           # Update version and changelog
           local firstline=1
           local _dchopts="-c ${_debianpath}/debian/changelog"
           echo "$lastgitlog" | while read LINE; do
-              [ $firstline == 1 ] && local cmd="dch $_dchopts -D $distro -b --force-distribution -v $fullver" || local cmd="dch $_dchopts -a"
+              [ $firstline == 1 ] && local cmd="dch $_dchopts -D ${ditribution_string:-$distro} -b --force-distribution -v $fullver" || local cmd="dch $_dchopts -a"
               firstline=0
               local commitid=`echo "$LINE" | cut -d'|' -f1`
               local email=`echo "$LINE" | cut -d'|' -f2`
@@ -62,12 +78,24 @@ main () {
           # Prepare source tarball
           pushd $_srcpath &>/dev/null
           local ignore_list="rally horizon-vendor-theme"
-          if [ $(echo $ignore_list | grep -Eo "(^| )$PACKAGENAME( |$)") ]; then
+          if [ "$IS_PLUGIN" = "true" ]
+          then
+              git -C ${_srcpath} archive --format tar.gz \
+                  --prefix "${srcpackagename}-${version}/" \
+                  --worktree-attributes -o ${BUILDDIR}/${TAR_NAME} HEAD
+          elif [ $(echo $ignore_list | grep -Eo "(^| )$PACKAGENAME( |$)") ]; then
               # Do not perform `setup.py sdist` for rally packages
               tar -czf ${BUILDDIR}/$TAR_NAME $EXCLUDES .
           else
+              # Use virtualenv to deal with different pbr requirements
+              local venv=$(mktemp -d)
+              virtualenv "$venv"
+              source "${venv}/bin/activate"
+              pip install --upgrade setuptools
               python setup.py --version  # this will download pbr if it's not available
               PBR_VERSION=$release_tag python setup.py sdist -d ${BUILDDIR}/
+              deactivate
+              [ -d "$venv" ] && rm -rf "$venv"
               # Fix source folder name at sdist tarball
               local sdist_tarball=$(find ${BUILDDIR}/ -maxdepth 1 -name "*.gz")
               if [ "$(tar -tf $sdist_tarball | head -n 1 | cut -d'/' -f1)" != "${srcpackagename}-${version}" ] ; then
@@ -109,16 +137,47 @@ main () {
   # Build stage
   local REQUEST=$REQUEST_NUM
   [ -n "$LP_BUG" ] && REQUEST=$LP_BUG
-
   COMPONENTS="main restricted"
+  DEB_HOTFIX_DIST_NAME=${DEB_HOTFIX_DIST_NAME:-hotfix}
   [ -n "${EXTRAREPO}" ] && EXTRAREPO="${EXTRAREPO}|"
   EXTRAREPO="${EXTRAREPO}http://${REMOTE_REPO_HOST}/${DEB_REPO_PATH} ${DEB_DIST_NAME} ${COMPONENTS}"
-  [ "$IS_UPDATES" == 'true' ] \
-      && EXTRAREPO="${EXTRAREPO}|http://${REMOTE_REPO_HOST}/${DEB_REPO_PATH} ${DEB_PROPOSED_DIST_NAME} ${COMPONENTS}"
-  [ "$GERRIT_CHANGE_STATUS" == "NEW" ] && [ "$IS_UPDATES" != "true" ] && [ -n "$LP_BUG" ] \
-      && EXTRAREPO="${EXTRAREPO}|http://${REMOTE_REPO_HOST}/${REPO_REQUEST_PATH_PREFIX}/${REQUEST}/${DEB_REPO_PATH} ${DEB_DIST_NAME} ${COMPONENTS}"
-  [ "$GERRIT_CHANGE_STATUS" == "NEW" ] && [ "$IS_UPDATES" == "true" ] && [ -n "$LP_BUG" ] \
-      && EXTRAREPO="${EXTRAREPO}|http://${REMOTE_REPO_HOST}/${REPO_REQUEST_PATH_PREFIX}/${REQUEST}/${DEB_REPO_PATH} ${DEB_PROPOSED_DIST_NAME} ${COMPONENTS}"
+  case true in
+      "$IS_HOTFIX" )
+          EXTRAREPO="${EXTRAREPO}|http://${REMOTE_REPO_HOST}/${DEB_REPO_PATH} ${DEB_HOTFIX_DIST_NAME} ${COMPONENTS}"
+          EXTRAREPO="${EXTRAREPO}|http://${REMOTE_REPO_HOST}/${DEB_REPO_PATH} ${DEB_UPDATES_DIST_NAME} ${COMPONENTS}"
+          EXTRAREPO="${EXTRAREPO}|http://${REMOTE_REPO_HOST}/${DEB_REPO_PATH} ${DEB_SECURITY_DIST_NAME} ${COMPONENTS}"
+          ;;
+      "$IS_SECURITY" )
+          EXTRAREPO="${EXTRAREPO}|http://${REMOTE_REPO_HOST}/${DEB_REPO_PATH} ${DEB_UPDATES_DIST_NAME} ${COMPONENTS}"
+          EXTRAREPO="${EXTRAREPO}|http://${REMOTE_REPO_HOST}/${DEB_REPO_PATH} ${DEB_SECURITY_DIST_NAME} ${COMPONENTS}"
+          ;;
+      "$IS_UPDATES" )
+          EXTRAREPO="${EXTRAREPO}|http://${REMOTE_REPO_HOST}/${DEB_REPO_PATH} ${DEB_PROPOSED_DIST_NAME} ${COMPONENTS}"
+          EXTRAREPO="${EXTRAREPO}|http://${REMOTE_REPO_HOST}/${DEB_REPO_PATH} ${DEB_UPDATES_DIST_NAME} ${COMPONENTS}"
+          EXTRAREPO="${EXTRAREPO}|http://${REMOTE_REPO_HOST}/${DEB_REPO_PATH} ${DEB_SECURITY_DIST_NAME} ${COMPONENTS}"
+          ;;
+  esac
+
+  if [ "$GERRIT_CHANGE_STATUS" == "NEW" ] && [ -n "$LP_BUG" -o -n "$CUSTOM_REPO_ID" ] ; then
+      local DEB_REQUEST_REPO_PATH=${DEB_REQUEST_REPO_PATH:-$DEB_REPO_PATH}
+      local REMOTE_REQUEST_REPO_HOST=${REMOTE_REQUEST_REPO_HOST:-$REMOTE_REPO_HOST}
+      case true in
+          "$IS_HOTFIX" )
+              local DEB_REQUEST_DIST_NAME=$DEB_HOTFIX_DIST_NAME
+              ;;
+          "$IS_SECURITY" )
+              local DEB_REQUEST_DIST_NAME=$DEB_SECURITY_DIST_NAME
+              ;;
+          "$IS_UPDATES" )
+              local DEB_REQUEST_DIST_NAME=$DEB_PROPOSED_DIST_NAME
+              ;;
+          *)
+              local DEB_REQUEST_DIST_NAME=$DEB_DIST_NAME
+              ;;
+      esac
+      EXTRAREPO="${EXTRAREPO}|http://${REMOTE_REQUEST_REPO_HOST}/${REPO_REQUEST_PATH_PREFIX}/${REQUEST}/${DEB_REQUEST_REPO_PATH} ${DEB_REQUEST_DIST_NAME} ${COMPONENTS}"
+  fi
+
   export EXTRAREPO
 
   if [ -n "$EXTRAREPO" ] ; then
@@ -156,6 +215,7 @@ main () {
 		REQUEST_NUM=$REQUEST_NUM
 		LP_BUG=$LP_BUG
 		IS_SECURITY=$IS_SECURITY
+		IS_HOTFIX=$IS_HOTFIX
 		EXTRAREPO="$EXTRAREPO"
 		REPO_TYPE=deb
 		DIST=$DIST
